@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -70,7 +71,7 @@ func (s *Server) handleFS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRead(w http.ResponseWriter, r *http.Request, path string) {
 	data, err := s.backend.Read(path, 0, -1)
 	if err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			errJSON(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -85,7 +86,7 @@ func (s *Server) handleRead(w http.ResponseWriter, r *http.Request, path string)
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request, path string) {
 	entries, err := s.backend.ReadDir(path)
 	if err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			errJSON(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -131,9 +132,10 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, path string
 }
 
 func (s *Server) handleStat(w http.ResponseWriter, r *http.Request, path string) {
-	info, err := s.backend.Stat(path)
+	// Single call to store.Stat to get both FileInfo and revision
+	nf, err := s.backend.Store().Stat(path)
 	if err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -141,12 +143,14 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request, path string)
 		return
 	}
 
-	w.Header().Set("Content-Length", strconv.FormatInt(info.Size, 10))
-	w.Header().Set("X-Dat9-IsDir", fmt.Sprintf("%v", info.IsDir))
+	var size int64
+	if nf.File != nil {
+		size = nf.File.SizeBytes
+	}
+	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	w.Header().Set("X-Dat9-IsDir", fmt.Sprintf("%v", nf.Node.IsDirectory))
 
-	// Get revision from the file record
-	nf, err := s.backend.Store().Stat(normalizePath(path))
-	if err == nil && nf.File != nil {
+	if nf.File != nil {
 		w.Header().Set("X-Dat9-Revision", strconv.FormatInt(nf.File.Revision, 10))
 	}
 
@@ -154,7 +158,6 @@ func (s *Server) handleStat(w http.ResponseWriter, r *http.Request, path string)
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path string) {
-	// Check if recursive
 	recursive := r.URL.Query().Has("recursive")
 
 	var err error
@@ -164,7 +167,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, path strin
 		err = s.backend.Remove(path)
 	}
 	if err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			errJSON(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -184,7 +187,7 @@ func (s *Server) handleCopy(w http.ResponseWriter, r *http.Request, dstPath stri
 	}
 
 	if err := s.backend.CopyFile(srcPath, dstPath); err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			errJSON(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -204,7 +207,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request, newPath st
 	}
 
 	if err := s.backend.Rename(oldPath, newPath); err != nil {
-		if isNotFound(err) {
+		if errors.Is(err, meta.ErrNotFound) {
 			errJSON(w, http.StatusNotFound, err.Error())
 			return
 		}
@@ -229,17 +232,6 @@ func errJSON(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
-
-func isNotFound(err error) bool {
-	return err == meta.ErrNotFound || strings.Contains(err.Error(), "not found")
-}
-
-func normalizePath(path string) string {
-	if strings.HasSuffix(path, "/") || path == "/" {
-		return path
-	}
-	return path
 }
 
 // ListenAndServe starts the server on the given address.

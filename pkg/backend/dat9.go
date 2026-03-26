@@ -9,10 +9,11 @@ import (
 	"fmt"
 	"io"
 	"math/rand"
+	"mime"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/c4pt0r/agfs/agfs-server/pkg/filesystem"
@@ -27,19 +28,33 @@ const smallFileThreshold = 1 << 20 // 1MB
 type Dat9Backend struct {
 	store   *meta.Store
 	blobDir string
+	mu      sync.Mutex
+	entropy io.Reader
 }
 
 func New(store *meta.Store, blobDir string) (*Dat9Backend, error) {
 	if err := os.MkdirAll(blobDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create blob dir: %w", err)
 	}
-	return &Dat9Backend{store: store, blobDir: blobDir}, nil
+	return &Dat9Backend{
+		store:   store,
+		blobDir: blobDir,
+		entropy: ulid.Monotonic(rand.New(rand.NewSource(time.Now().UnixNano())), 0),
+	}, nil
 }
 
 func (b *Dat9Backend) Store() *meta.Store { return b.store }
 
 func (b *Dat9Backend) genID() string {
-	return ulid.MustNew(ulid.Timestamp(time.Now()), ulid.Monotonic(rand.New(rand.NewSource(time.Now().UnixNano())), 0)).String()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, err := ulid.New(ulid.Timestamp(time.Now()), b.entropy)
+	if err != nil {
+		// Fallback: reset entropy on exhaustion
+		b.entropy = ulid.Monotonic(rand.New(rand.NewSource(time.Now().UnixNano())), 0)
+		id = ulid.MustNew(ulid.Timestamp(time.Now()), b.entropy)
+	}
+	return id.String()
 }
 
 func (b *Dat9Backend) Create(path string) error {
@@ -92,14 +107,7 @@ func (b *Dat9Backend) Remove(path string) error {
 		return err
 	}
 	if node.IsDirectory {
-		children, err := b.store.ListNodes(path)
-		if err != nil {
-			return err
-		}
-		if len(children) > 0 {
-			return fmt.Errorf("directory not empty: %s", path)
-		}
-		return b.store.DeleteNode(path)
+		return b.store.DeleteEmptyDir(path)
 	}
 	deleted, err := b.store.DeleteFileWithRefCheck(path)
 	if err != nil {
@@ -227,12 +235,18 @@ func (b *Dat9Backend) overwriteFile(nf *meta.NodeWithFile, data []byte, offset i
 
 	var finalData []byte
 	if flags&filesystem.WriteFlagAppend != 0 {
-		existing, _ := b.readBlob(nf.File.StorageRef)
+		existing, err := b.readBlob(nf.File.StorageRef)
+		if err != nil {
+			return 0, fmt.Errorf("read existing blob for append: %w", err)
+		}
 		finalData = append(existing, data...)
 	} else if flags&filesystem.WriteFlagTruncate != 0 || offset <= 0 {
 		finalData = data
 	} else {
-		existing, _ := b.readBlob(nf.File.StorageRef)
+		existing, err := b.readBlob(nf.File.StorageRef)
+		if err != nil {
+			return 0, fmt.Errorf("read existing blob for offset write: %w", err)
+		}
 		if offset > int64(len(existing)) {
 			existing = append(existing, make([]byte, offset-int64(len(existing)))...)
 		}
@@ -439,36 +453,16 @@ func sha256sum(data []byte) string {
 }
 
 func detectContentType(path string, data []byte) string {
-	ext := pathpkg.Ext(strings.TrimSuffix(path, "/"))
-	switch ext {
-	case ".txt", ".md", ".csv", ".log":
-		return "text/plain"
-	case ".json":
-		return "application/json"
-	case ".html", ".htm":
-		return "text/html"
-	case ".xml":
-		return "application/xml"
-	case ".yaml", ".yml":
-		return "application/yaml"
-	case ".pdf":
-		return "application/pdf"
-	case ".png":
-		return "image/png"
-	case ".jpg", ".jpeg":
-		return "image/jpeg"
-	case ".tar":
-		return "application/x-tar"
-	case ".gz":
-		return "application/gzip"
-	case ".zip":
-		return "application/zip"
-	default:
-		if len(data) > 0 && isTextContent(data) {
-			return "text/plain"
+	ext := pathutil.Ext(path)
+	if ext != "" {
+		if ct := mime.TypeByExtension(ext); ct != "" {
+			return ct
 		}
-		return "application/octet-stream"
 	}
+	if len(data) > 0 && isTextContent(data) {
+		return "text/plain"
+	}
+	return "application/octet-stream"
 }
 
 func isTextContent(data []byte) bool {

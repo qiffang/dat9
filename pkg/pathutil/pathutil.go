@@ -44,16 +44,17 @@ func canonicalize(raw string, isDir bool) (string, error) {
 		raw = "/" + raw
 	}
 
-	cleaned := pathpkg.Clean(raw)
-	if cleaned == "." {
-		return "/", nil
-	}
-
+	// Reject ".." and "." segments before cleaning (security check first)
 	segments := strings.Split(strings.Trim(raw, "/"), "/")
 	for _, seg := range segments {
 		if seg == "." || seg == ".." {
 			return "", fmt.Errorf("path contains %q segment", seg)
 		}
+	}
+
+	cleaned := pathpkg.Clean(raw)
+	if cleaned == "." {
+		return "/", nil
 	}
 
 	cleaned = strings.TrimSuffix(cleaned, "/")

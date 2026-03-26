@@ -224,6 +224,32 @@ func (s *Store) DeleteNode(path string) error {
 	return nil
 }
 
+// DeleteEmptyDir atomically checks a directory is empty and deletes it.
+func (s *Store) DeleteEmptyDir(path string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var count int64
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM file_nodes WHERE parent_path = ?`, path).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return fmt.Errorf("directory not empty: %s", path)
+	}
+	res, err := tx.Exec(`DELETE FROM file_nodes WHERE path = ? AND is_directory = 1`, path)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteNodesByPrefix(prefix string) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM file_nodes WHERE path = ? OR path LIKE ?`,
 		prefix, prefix+"%")

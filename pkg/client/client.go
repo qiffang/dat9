@@ -3,6 +3,7 @@
 package client
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,7 +58,7 @@ func (c *Client) do(req *http.Request) (*http.Response, error) {
 
 // Write uploads data to a remote path.
 func (c *Client) Write(path string, data []byte) error {
-	req, err := http.NewRequest(http.MethodPut, c.url(path), strings.NewReader(string(data)))
+	req, err := http.NewRequest(http.MethodPut, c.url(path), bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
